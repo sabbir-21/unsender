@@ -1,0 +1,6 @@
+alert(
+      'Could not find scroller. This normally happens because you do not ' +
+        'have enough messages to scroll through. Failing.',
+    );
+
+    
