@@ -1,12 +1,38 @@
-// Remove Queries -------------------------------------------------------------
-const LOADING_QUERY = '[role="main"] svg[aria-valuetext="Loading..."], [role="progressbar"]';
+// ============================================================================
+// ========================= USER CONFIGURATION AREA ==========================
+// ============================================================================
+const CONFIG = {
+  // ⏱️ DELAYS (In milliseconds. 1000 = 1 second. Increase these if it glitches/misses)
+  HOVER_DELAY: 150,            // Time to wait after hovering over a message
+  MENU_RENDER_DELAY: 400,      // Time to wait for the 3-dots menu to open
+  MODAL_RENDER_DELAY: 800,     // Time to wait for the central popup to appear
+  NETWORK_REQUEST_DELAY: 1000, // Wait time after clicking "Remove" to let Facebook process
+  SCROLL_WAIT_DELAY: 1200,     // Time to wait after scrolling to let old messages load
+  MAX_RETRIES: 2,              // How many times it tries to delete a message before permanently skipping it
 
-// Consts and Params.
-const STATUS = {
-  CONTINUE: 'continue',
-  ERROR: 'error',
-  COMPLETE: 'complete',
+  // 🛑 EXCLUSIONS (Add text in lowercase here to completely skip certain messages)
+  IGNORE_TEXTS: [
+    'unsent a message',
+    'deleted a message',
+    'group audio call',
+    'video call',
+    'tap to join',
+    'missed call'
+  ],
+
+  // 🔍 BUTTON & TEXT IDENTIFIERS (What the script looks for. Keep lowercase)
+  MENU_UNSEND_TEXTS: ['remove', 'unsend'],
+  DIALOG_UNSEND_IDENTIFIERS: ['unsend'],
+  DIALOG_RADIO_TEXT: 'unsend for everyone',
+  CONFIRM_BUTTON_TEXTS: ['remove', 'unsend'],
+  CANCEL_BUTTON_TEXTS: ['cancel'],
+  OKAY_BUTTON_TEXTS: ['okay']
 };
+// ============================================================================
+// ============================================================================
+
+const LOADING_QUERY = '[role="main"] svg[aria-valuetext="Loading..."], [role="progressbar"]';
+const STATUS = { CONTINUE: 'continue', ERROR: 'error', COMPLETE: 'complete' };
 
 let DELAY = 5;
 const RUNNER_COUNT = 300;
@@ -18,7 +44,8 @@ const lastClearedKey = 'shoot-the-messenger-last-cleared' + currentURL;
 const delayKey = 'shoot-the-messenger-delay' + currentURL;
 
 let scrollerCache = null;
-const clickCountPerElement = new Map();
+const clickCountPerId = new Map();
+const blacklistedMessageIds = new Set(); // Memory storage that survives React refreshes
 
 // Helper functions ----------------------------------------------------------
 function getRandom(min, max) {
@@ -26,15 +53,9 @@ function getRandom(min, max) {
 }
 
 function sleep(ms) {
-  let randomizedSleep = getRandom(ms, ms * 1.2);
-  return new Promise((resolve) => setTimeout(resolve, randomizedSleep));
+  return new Promise((resolve) => setTimeout(resolve, getRandom(ms, ms * 1.2)));
 }
 
-function reload() {
-  window.location = window.location.pathname;
-}
-
-// Dynamically climb the DOM to find the scrollable container
 function getScroller() {
   if (scrollerCache) return scrollerCache;
 
@@ -54,57 +75,47 @@ function getScroller() {
 
 // Removal functions ---------------------------------------------------------
 async function prepareDOMForRemoval() {
-  const elementsToRemove = [];
-
-  for (let [el, count] of clickCountPerElement) {
-    if (count > 3) {
-      elementsToRemove.push(el);
-    }
-  }
-
   getScroller().scrollTop = 0;
   await sleep(600);
-
-  elementsToRemove.shift();
-  elementsToRemove.reverse();
-  
-  for (let badEl of elementsToRemove) {
-    await sleep(100);
-    if (badEl) badEl.remove();
-  }
 }
 
 async function getAllMessages() {
   const allMessages = Array.from(document.querySelectorAll('div[data-message-id]'));
   
   return allMessages.filter(el => {
+    const msgId = el.getAttribute('data-message-id');
+    if (!msgId || blacklistedMessageIds.has(msgId)) return false; // Skip if blacklisted
+
     const label = (el.getAttribute('aria-label') || '').toLowerCase();
     const textContent = (el.textContent || '').toLowerCase(); 
     
-    const isMine = label.includes('you');
+    // Ensure it's your message
+    const isMine = label.includes(' you:') || label.endsWith(' you') || label === 'you';
     
-    // STRICT EXCLUSION: Catches both "You unsent a message" and "You deleted a message"
-    const isAlreadyUnsent = textContent.includes('unsent a message') || 
-                            textContent.includes('deleted a message') || 
-                            label.includes('unsent');
+    // Check against the IGNORE list in CONFIG
+    const shouldIgnore = CONFIG.IGNORE_TEXTS.some(ignoreText => 
+        textContent.includes(ignoreText) || label.includes(ignoreText)
+    );
     
-    return isMine && !isAlreadyUnsent;
+    return isMine && !shouldIgnore;
   });
 }
 
 async function unsendAllVisibleMessages() {
-  prepareDOMForRemoval();
+  await prepareDOMForRemoval();
   const rows = await getAllMessages();
 
   for (let el of rows.slice().reverse()) {
+    const msgId = el.getAttribute('data-message-id');
+    
     el.scrollIntoView({ behavior: 'instant', block: 'center' });
-    await sleep(100); // Wait for scroll to settle
+    await sleep(100); 
 
-    // Trigger hover state to make the "More" button appear
+    // Hover simulation
     el.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
     el.dispatchEvent(new MouseEvent('mousemove', { bubbles: true }));
-    await sleep(200); // Hover delay
+    await sleep(CONFIG.HOVER_DELAY); 
 
     const moreButton = el.querySelector('[aria-label="More actions"], [aria-label="More"]');
     if (!moreButton) {
@@ -112,13 +123,21 @@ async function unsendAllVisibleMessages() {
     }
     
     moreButton.click();
-    clickCountPerElement.set(el, (clickCountPerElement.get(el) ?? 0) + 1);
-    await sleep(400); // Menu rendering delay
+    
+    // Track attempts by unique ID to prevent infinite loops
+    const currentCount = (clickCountPerId.get(msgId) || 0) + 1;
+    clickCountPerId.set(msgId, currentCount);
+    if (currentCount > CONFIG.MAX_RETRIES) {
+        console.log(`Blacklisting stuck message: ${msgId}`);
+        blacklistedMessageIds.add(msgId);
+    }
+    
+    await sleep(CONFIG.MENU_RENDER_DELAY); 
 
     const menuItems = Array.from(document.querySelectorAll('[role="menuitem"]'));
     const removeMenuBtn = menuItems.find(b => {
       const text = (b.textContent || b.getAttribute('aria-label') || '').toLowerCase();
-      return text.includes('remove') || text.includes('unsend');
+      return CONFIG.MENU_UNSEND_TEXTS.some(t => text.includes(t));
     });
 
     if (!removeMenuBtn) {
@@ -127,28 +146,27 @@ async function unsendAllVisibleMessages() {
     }
 
     removeMenuBtn.click();
-    
-    // Wait for the confirmation modal to fully render
-    await sleep(800); // Modal rendering delay
+    await sleep(CONFIG.MODAL_RENDER_DELAY); 
 
     const dialog = document.querySelector('div[role="dialog"]');
     if (dialog) {
       const dialogText = (dialog.textContent || '').toLowerCase();
       const dialogLabel = (dialog.getAttribute('aria-label') || '').toLowerCase();
       
-      const isUnsendDialog = dialogText.includes('unsend') || dialogLabel.includes('unsend');
+      const isUnsendDialog = CONFIG.DIALOG_UNSEND_IDENTIFIERS.some(t => dialogText.includes(t) || dialogLabel.includes(t));
       
       const buttons = Array.from(dialog.querySelectorAll('[role="button"], button'));
       const cancelButton = buttons.find(b => {
           const text = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
           const isHidden = b.getAttribute('aria-hidden') === 'true';
           const isDisabled = b.getAttribute('aria-disabled') === 'true';
-          return text === 'cancel' && !isHidden && !isDisabled;
+          return CONFIG.CANCEL_BUTTON_TEXTS.includes(text) && !isHidden && !isDisabled;
       });
 
-      // ABSOLUTE FAIL-SAFE
+      // FAIL-SAFE: If it's a "Remove for you" dialog, cancel and blacklist
       if (!isUnsendDialog) {
-         console.log("Dialog is not an 'Unsend' dialog. Canceling to avoid removing tombstone.");
+         console.log("Dialog is not an 'Unsend' dialog. Canceling and blacklisting element.");
+         blacklistedMessageIds.add(msgId); // Permanently skip this element
          if (cancelButton) cancelButton.click();
          await sleep(300);
          continue; 
@@ -156,7 +174,7 @@ async function unsendAllVisibleMessages() {
 
       // Explicitly select the "Unsend for everyone" radio button
       const labels = Array.from(dialog.querySelectorAll('label'));
-      const unsendEveryoneLabel = labels.find(l => (l.textContent || '').toLowerCase().includes('unsend for everyone'));
+      const unsendEveryoneLabel = labels.find(l => (l.textContent || '').toLowerCase().includes(CONFIG.DIALOG_RADIO_TEXT));
       if (unsendEveryoneLabel) {
           unsendEveryoneLabel.click();
           await sleep(150);
@@ -166,7 +184,7 @@ async function unsendAllVisibleMessages() {
           const text = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
           const isHidden = b.getAttribute('aria-hidden') === 'true';
           const isDisabled = b.getAttribute('aria-disabled') === 'true';
-          return (text === 'remove' || text === 'unsend') && !isHidden && !isDisabled;
+          return CONFIG.CONFIRM_BUTTON_TEXTS.includes(text) && !isHidden && !isDisabled;
       });
       
       if (DEBUG_MODE || !confirmButton) {
@@ -176,14 +194,14 @@ async function unsendAllVisibleMessages() {
         console.log("Clicking the final confirmation button...");
         confirmButton.click();
 
-        await sleep(1000); // Network request time buffer
+        await sleep(CONFIG.NETWORK_REQUEST_DELAY); 
         
         // Handle secondary "Okay" modal if Facebook prompts it
         const okayDialog = document.querySelector('div[role="dialog"]');
         if (okayDialog) {
             const okayBtn = Array.from(okayDialog.querySelectorAll('[role="button"], button')).find(b => {
                const text = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
-               return text === 'okay' && b.getAttribute('aria-hidden') !== 'true';
+               return CONFIG.OKAY_BUTTON_TEXTS.includes(text) && b.getAttribute('aria-hidden') !== 'true';
             });
             if (okayBtn) {
                okayBtn.click();
@@ -199,7 +217,7 @@ async function unsendAllVisibleMessages() {
         console.log("Dialog is stuck. Forcing close to prevent freezing.");
         const cancelBtn = Array.from(stuckDialog.querySelectorAll('[role="button"], button')).find(b => {
             const text = (b.textContent || b.getAttribute('aria-label') || '').trim().toLowerCase();
-            return text === 'cancel' && b.getAttribute('aria-hidden') !== 'true';
+            return CONFIG.CANCEL_BUTTON_TEXTS.includes(text) && b.getAttribute('aria-hidden') !== 'true';
         });
         if (cancelBtn) cancelBtn.click();
         await sleep(300);
@@ -207,7 +225,7 @@ async function unsendAllVisibleMessages() {
   }
 
   const scroller_ = getScroller();
-  await sleep(1200); 
+  await sleep(CONFIG.SCROLL_WAIT_DELAY); 
   if (!scroller_ || scroller_.scrollTop === 0) {
     return { status: STATUS.COMPLETE };
   }
