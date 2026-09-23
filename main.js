@@ -35,7 +35,7 @@ const LOADING_QUERY = '[role="main"] svg[aria-valuetext="Loading..."], [role="pr
 const STATUS = { CONTINUE: 'continue', ERROR: 'error', COMPLETE: 'complete' };
 
 let DELAY = 5;
-const RUNNER_COUNT = 300;
+const RUNNER_COUNT = 2000;
 const DEBUG_MODE = false; 
 
 const currentURL = location.protocol + '//' + location.host + location.pathname;
